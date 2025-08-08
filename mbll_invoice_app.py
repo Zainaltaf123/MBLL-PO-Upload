@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import io
 import zipfile
-import os
 from openpyxl import load_workbook
 
 st.set_page_config(page_title="MBLL Invoice App", layout="centered")
@@ -37,50 +36,49 @@ if order_file and template_file:
         # Create zip in memory
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            # Loop through each store and supplier reference
             for (store, supplier_ref), group_df in pivot_df.groupby(["Store Name", "Supplier Reference"]):
                 supplier_data = group_df[["TechPOS Sku", "Total Units", "Unit Cost"]]
 
-                # Load template
+                # Reload template for each iteration
                 template_file.seek(0)
                 wb = load_workbook(template_file)
                 ws = wb.active
 
-                # Set Supplier Reference
+                # Set Supplier Reference in cell B8
                 ws["B8"] = supplier_ref
 
-                # Write product data from A14
+                # Write product data starting from row 14
                 start_row = 14
-                for i, row in supplier_data.iterrows():
-                    ws.cell(row=start_row, column=1).value = row["TechPOS Sku"]
-                    ws.cell(row=start_row, column=2).value = row["Total Units"]
-                    ws.cell(row=start_row, column=3).value = row["Unit Cost"]
+                for _, row in supplier_data.iterrows():
+                    ws.cell(row=start_row, column=1, value=row["TechPOS Sku"])
+                    ws.cell(row=start_row, column=2, value=row["Total Units"])
+                    ws.cell(row=start_row, column=3, value=row["Unit Cost"])
                     start_row += 1
 
-                # Save Excel to bytes
+                # Save to buffer
                 invoice_buffer = io.BytesIO()
                 wb.save(invoice_buffer)
                 invoice_buffer.seek(0)
 
-                # Create folder path inside ZIP
+                # Safe filenames
                 safe_store = store.replace("/", "-").replace("\\", "-")
                 filename = f"{safe_store} - {supplier_ref} MBLL Invoice.xlsx"
                 folder_path = f"{safe_store}/{filename}"
 
-                # Add to zip
+                # Write to ZIP
                 zip_file.writestr(folder_path, invoice_buffer.read())
 
         zip_buffer.seek(0)
 
-        # --- Create summary Excel buffer ---
+        # Prepare summary Excel file
         summary_excel = io.BytesIO()
-        with pd.ExcelWriter(summary_excel, engine='openpyxl') as writer:
+        with pd.ExcelWriter(summary_excel, engine="openpyxl") as writer:
             summary_df.to_excel(writer, index=False)
         summary_excel.seek(0)
 
         st.success("✅ Processing complete! Download your files below:")
 
-        # --- Download Buttons ---
+        # Download buttons
         st.download_button(
             label="📥 Download Summary Excel",
             data=summary_excel,
@@ -96,4 +94,3 @@ if order_file and template_file:
         )
 else:
     st.info("📂 Please upload both files to begin.")
-
