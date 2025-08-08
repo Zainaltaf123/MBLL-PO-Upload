@@ -1,115 +1,90 @@
 import streamlit as st
 import pandas as pd
-import os
-import zipfile
 import io
-import re
+import zipfile
+import os
 from openpyxl import load_workbook
+from openpyxl.writer.excel import save_virtual_workbook
 
-# --- Helper function to sanitize filenames ---
-def sanitize_filename(name):
-    return re.sub(r'[\\/:"*?<>|]+', '_', str(name))
+st.set_page_config(page_title="MBLL Invoice App", layout="centered")
 
-# --- Invoice Generation Function ---
-def process_invoices(order_df, invoice_template):
-    # Create pivot table
-    pivot_df = order_df.pivot_table(
-        index=['Store Name', 'Supplier', 'Supplier Reference', 'PO Number', 'TechPOS Sku'],
-        values=['Total Units', 'Unit Cost', 'Total ($)'],
-        aggfunc='sum'
-    ).reset_index()
-
-    grouped = pivot_df.groupby(['Store Name', 'Supplier Reference'])
-
-    zip_buffer = io.BytesIO()
-    summary_data = []
-
-    with zipfile.ZipFile(zip_buffer, 'w') as zipf:
-        for (store, supplier_ref), group_data in grouped:
-            clean_store = sanitize_filename(store)
-            clean_supplier_ref = sanitize_filename(supplier_ref)
-            folder_name = f"Invoices/{clean_store}"
-            file_name = f"{clean_store} - {clean_supplier_ref}.xlsx"
-            file_path = f"{folder_name}/{file_name}"
-
-            # Load invoice template
-            wb = load_workbook(invoice_template)
-            ws = wb.active
-
-            # Write Supplier Reference to B8
-            ws['B8'] = supplier_ref
-
-            # Write data from A14
-            start_row = 14
-            for _, row in group_data.iterrows():
-                ws.cell(row=start_row, column=1, value=row['TechPOS Sku'])
-                ws.cell(row=start_row, column=2, value=row['Total Units'])
-                ws.cell(row=start_row, column=3, value=row['Unit Cost'])
-                start_row += 1
-
-            # Save to in-memory buffer
-            invoice_buffer = io.BytesIO()
-            wb.save(invoice_buffer)
-            invoice_buffer.seek(0)
-
-            # Write to zip
-            zipf.writestr(file_path, invoice_buffer.read())
-
-            # Add to summary
-            summary_data.append({
-                'Store Name': store,
-                'Supplier Reference': supplier_ref,
-                'Total SKUs': group_data['TechPOS Sku'].nunique(),
-                'Total Quantity': group_data['Total Units'].sum(),
-                'Total Cost': group_data['Total ($)'].sum()
-            })
-
-        # Create summary DataFrame and add to zip
-        summary_df = pd.DataFrame(summary_data)
-        summary_buffer = io.BytesIO()
-        summary_df.to_excel(summary_buffer, index=False)
-        summary_buffer.seek(0)
-        zipf.writestr("MBLL_Invoice_Summary.xlsx", summary_buffer.read())
-
-    zip_buffer.seek(0)
-    return summary_df, zip_buffer
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="MBLL Invoice Generator", layout="centered")
 st.title("📦 MBLL Invoice Generator")
+st.write("Upload the MBLL Order Summary and Invoice Template files below:")
 
-with st.expander("📘 Instructions"):
-    st.markdown("""
-    **How to use:**
-    1. Upload the **MBLL Order Summary.xlsx** file  
-    2. Upload the **Invoice Template.xlsx** file  
-    3. Click **Generate Invoices**
-    4. Download the generated **Summary Excel** and **ZIP of invoices**
-    """)
+# File uploads
+order_file = st.file_uploader("📄 MBLL Order Summary (.xlsx)", type=["xlsx"])
+template_file = st.file_uploader("📄 Invoice Template (.xlsx)", type=["xlsx"])
 
-# File uploaders
-order_file = st.file_uploader("📁 Upload MBLL Order Summary Excel", type=['xlsx'])
-template_file = st.file_uploader("📄 Upload Invoice Template Excel", type=['xlsx'])
+if order_file and template_file:
+    with st.spinner("Processing invoices..."):
+        # Load the order data
+        df = pd.read_excel(order_file)
 
-# Button to trigger processing
-if st.button("🚀 Generate Invoices"):
-    if order_file is None or template_file is None:
-        st.error("❗ Please upload both files to continue.")
-    else:
-        with st.spinner("Processing invoices..."):
-            order_df = pd.read_excel(order_file)
-            summary_df, zip_buffer = process_invoices(order_df, template_file)
+        # Pivot data
+        pivot_df = df.pivot_table(
+            index=["Store Name", "Supplier", "Supplier Reference", "PO Number", "TechPOS Sku"],
+            values=["Total Units", "Unit Cost", "Total ($)"],
+            aggfunc="sum",
+            fill_value=0
+        ).reset_index()
 
-        st.success("✅ Invoices and summary generated!")
+        # Prepare summary
+        summary_df = pivot_df.groupby(["Store Name", "Supplier Reference"]).agg(
+            Total_SKUs=("TechPOS Sku", "nunique"),
+            Total_Quantity=("Total Units", "sum"),
+            Total_Cost=("Total ($)", "sum")
+        ).reset_index()
 
-        # Display summary preview
-        st.subheader("📋 Invoice Summary")
-        st.dataframe(summary_df)
+        # Create zip in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            # Loop through each store and supplier reference
+            for (store, supplier_ref), group_df in pivot_df.groupby(["Store Name", "Supplier Reference"]):
+                supplier_data = group_df[["TechPOS Sku", "Total Units", "Unit Cost"]]
 
-        # Download buttons
+                # Load template
+                template_file.seek(0)
+                wb = load_workbook(template_file)
+                ws = wb.active
+
+                # Set Supplier Reference
+                ws["B8"] = supplier_ref
+
+                # Write product data from A14
+                start_row = 14
+                for i, row in supplier_data.iterrows():
+                    ws.cell(row=start_row, column=1).value = row["TechPOS Sku"]
+                    ws.cell(row=start_row, column=2).value = row["Total Units"]
+                    ws.cell(row=start_row, column=3).value = row["Unit Cost"]
+                    start_row += 1
+
+                # Save Excel to bytes
+                invoice_buffer = io.BytesIO()
+                wb.save(invoice_buffer)
+                invoice_buffer.seek(0)
+
+                # Create folder path inside ZIP
+                safe_store = store.replace("/", "-").replace("\\", "-")
+                filename = f"{safe_store} - {supplier_ref} MBLL Invoice.xlsx"
+                folder_path = f"{safe_store}/{filename}"
+
+                # Add to zip
+                zip_file.writestr(folder_path, invoice_buffer.read())
+
+        zip_buffer.seek(0)
+
+        # --- Create summary Excel buffer ---
+        summary_excel = io.BytesIO()
+        with pd.ExcelWriter(summary_excel, engine='openpyxl') as writer:
+            summary_df.to_excel(writer, index=False)
+        summary_excel.seek(0)
+
+        st.success("✅ Processing complete! Download your files below:")
+
+        # --- Download Buttons ---
         st.download_button(
             label="📥 Download Summary Excel",
-            data=summary_df.to_excel(index=False),
+            data=summary_excel,
             file_name="MBLL_Invoice_Summary.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
@@ -120,3 +95,5 @@ if st.button("🚀 Generate Invoices"):
             file_name="MBLL_Invoices.zip",
             mime="application/zip"
         )
+else:
+    st.info("📂 Please upload both files to begin.")
